@@ -1,0 +1,5 @@
+package-as: BuffBar
+
+ignore:
+  - README.md
+  - .github
