@@ -3,10 +3,16 @@ local ADDON, ns = ...
 local panel, category
 local refreshers = {}
 
-local function Header(parent, text, x, y)
+-- Section title with a thin rule under it
+local function Header(parent, text, x, y, width)
 	local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
 	fs:SetPoint("TOPLEFT", x, y)
 	fs:SetText(text)
+	local line = parent:CreateTexture(nil, "ARTWORK")
+	line:SetColorTexture(1, 1, 1, 0.15)
+	line:SetHeight(1)
+	line:SetPoint("TOPLEFT", x, y - 22)
+	line:SetWidth(width or 280)
 	return fs
 end
 
@@ -49,16 +55,39 @@ local function Tip(frame, title, text)
 	frame:HookScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
-local function Checkbox(parent, label, x, y, get, set, tip)
+-- Every option is one row: the label on the left, its control (checkbox, slider, dropdown or
+-- button) on the right. parent.labelW is the width of the label column.
+local function RowLabel(parent, text, x, y, labelW)
+	local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+	fs:SetPoint("TOPLEFT", x, y - 5)
+	fs:SetWidth(labelW - 8)
+	fs:SetJustifyH("LEFT")
+	fs:SetWordWrap(false)
+	fs:SetText(text)
+	return fs
+end
+
+local function ResetButton(parent, x, y)
+	local labelW = parent.labelW
+	RowLabel(parent, "Position", x, y, labelW)
+	local reset = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+	reset:SetSize(110, 22)
+	reset:SetPoint("TOPLEFT", x + labelW, y - 1)
+	reset:SetText("Reset")
+	Tip(reset, "Reset position", TIPS.reset)
+	reset:SetScript("OnClick", function() ns.ResetPosition() end)
+	return reset
+end
+
+-- The label is part of the hit area, so clicking it toggles the box too
+local function Checkbox(parent, label, x, y, get, set, tip, labelW)
+	labelW = labelW or parent.labelW
 	local c = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
-	c:SetPoint("TOPLEFT", x, y)
+	c:SetPoint("TOPLEFT", x + labelW, y)
+	c:SetHitRectInsets(-labelW, 0, 0, 0)
 	local text = c.text or c.Text or _G[c:GetName() and (c:GetName() .. "Text") or ""]
-	if not text then
-		text = c:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-		text:SetPoint("LEFT", c, "RIGHT", 2, 1)
-	end
-	text:SetText(label)
-	c.label = text
+	if text then text:SetText("") end
+	c.label = RowLabel(parent, label, x, y, labelW)
 	c:SetScript("OnClick", function(self)
 		set(self:GetChecked() and true or false)
 		for _, fn in ipairs(refreshers) do fn() end
@@ -69,13 +98,13 @@ local function Checkbox(parent, label, x, y, get, set, tip)
 end
 
 local function Slider(parent, label, x, y, min, max, step, key, fmt)
-	local title = parent:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-	title:SetPoint("TOPLEFT", x, y)
+	local labelW = parent.labelW
+	local title = RowLabel(parent, label, x, y, labelW)
 
 	local s = CreateFrame("Slider", nil, parent)
 	s:SetOrientation("HORIZONTAL")
-	s:SetSize(220, 16)
-	s:SetPoint("TOPLEFT", x, y - 20)
+	s:SetSize(parent.controlW, 16)
+	s:SetPoint("TOPLEFT", x + labelW + 4, y - 5)
 	s:SetMinMaxValues(min, max)
 	s:SetValueStep(step)
 	s:SetObeyStepOnDrag(true)
@@ -109,7 +138,8 @@ end
 local DROPDOWN_LABELS = { direction = "Direction", activeMode = "Active buffs", stackPref = "Stack tie-break", classPick = "Class" }
 local ddCount = 0
 -- choices: { { value =, text = }, ... }; the first one is the default for a missing/unknown value
-local function Dropdown(parent, x, y, key, choices, set, get)
+local function Dropdown(parent, x, y, key, choices, set, get, labelW)
+	labelW = labelW or parent.labelW
 	local function current()
 		local v
 		if get then v = get() else v = ns.GetDB()[key] end
@@ -118,10 +148,12 @@ local function Dropdown(parent, x, y, key, choices, set, get)
 		end
 		return choices[1]
 	end
+	RowLabel(parent, DROPDOWN_LABELS[key], x, y - 3, labelW)
 	ddCount = ddCount + 1
 	local dd = CreateFrame("Frame", "BuffBarDropdown" .. ddCount, parent, "UIDropDownMenuTemplate")
-	dd:SetPoint("TOPLEFT", x, y)
-	UIDropDownMenu_SetWidth(dd, 180)
+	-- the template has about 16px of padding on its left edge
+	dd:SetPoint("TOPLEFT", x + labelW - 16, y + 2)
+	UIDropDownMenu_SetWidth(dd, parent.controlW - 10)
 	UIDropDownMenu_Initialize(dd, function()
 		for _, c in ipairs(choices) do
 			local info = UIDropDownMenu_CreateInfo()
@@ -146,13 +178,13 @@ local DIRECTIONS = {
 	{ value = "RTL", text = "Grow left" },
 }
 local ACTIVE_CHOICES = {
-	{ value = "DIM", text = "Active buffs: dim" },
-	{ value = "HIDE", text = "Active buffs: hide" },
-	{ value = "OFF", text = "Active buffs: ignore" },
+	{ value = "DIM", text = "Dim" },
+	{ value = "HIDE", text = "Hide" },
+	{ value = "OFF", text = "Ignore" },
 }
 local STACK_CHOICES = {
-	{ value = "SMALL", text = "Smaller stacks first" },
-	{ value = "LARGE", text = "Larger stacks first" },
+	{ value = "SMALL", text = "Smaller first" },
+	{ value = "LARGE", text = "Larger first" },
 }
 
 -- Appearance settings shown beside the bar while it is selected in Edit Mode
@@ -162,7 +194,7 @@ function ns.ShowEditDialog(bar)
 	local db = ns.GetDB()
 	if not dialog then
 		dialog = CreateFrame("Frame", "BuffBarEditDialog", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-		dialog:SetSize(290, 290)
+		dialog:SetSize(290, 270)
 		dialog:SetFrameStrata("DIALOG")
 		dialog:SetClampedToScreen(true)
 		dialog:EnableMouse(true)
@@ -179,14 +211,19 @@ function ns.ShowEditDialog(bar)
 		close:SetPoint("TOPRIGHT", -4, -4)
 		close:SetScript("OnClick", function() ns.SetSelected(false) end)
 
-		Dropdown(dialog, 12, -44, "direction", DIRECTIONS, ns.SetDirection)
-		Slider(dialog, "Button size", 28, -90, 20, 64, 1, "size", "%d")
-		Slider(dialog, "Spacing", 28, -136, 0, 20, 1, "spacing", "%d")
-		Slider(dialog, "Scale", 28, -182, 0.5, 2, 0.05, "scale", "%.2f")
-		Checkbox(dialog, "Hide empty buttons", 20, -222,
+		dialog.labelW, dialog.controlW = 125, 110
+		local y = -48
+		Dropdown(dialog, 20, y, "direction", DIRECTIONS, ns.SetDirection)
+		y = y - 32
+		Slider(dialog, "Button size", 20, y, 20, 64, 1, "size", "%d")
+		Slider(dialog, "Spacing", 20, y - 28, 0, 20, 1, "spacing", "%d")
+		Slider(dialog, "Scale", 20, y - 56, 0.5, 2, 0.05, "scale", "%.2f")
+		y = y - 90
+		Checkbox(dialog, "Hide empty buttons", 20, y,
 			function() return db.hideEmpty end, function(v) db.hideEmpty = v; ns.ApplySettings() end)
-		Checkbox(dialog, "Show item counts", 20, -248,
+		Checkbox(dialog, "Show item counts", 20, y - 26,
 			function() return db.showCount end, function(v) db.showCount = v; ns.ApplySettings() end)
+		ResetButton(dialog, 20, y - 58)
 	end
 	-- below the bar when it is in the top half of the screen, above otherwise
 	local _, cy = bar:GetCenter()
@@ -258,36 +295,37 @@ function ns.BuildOptions()
 	title:SetPoint("TOPLEFT", 16, -16)
 	title:SetText("Buff Bar")
 
-	-- Layout
-	Header(panel, "Layout", 16, -70)
-	Dropdown(panel, 8, -98, "direction", DIRECTIONS, ns.SetDirection)
+	-- Left column: Layout, then Behaviour. Right column: Buttons (and class buffs).
+	panel.labelW, panel.controlW = 150, 110
+	Header(panel, "Layout", 16, -64)
+	local y = -96
+	Dropdown(panel, 16, y, "direction", DIRECTIONS, ns.SetDirection)
+	Slider(panel, "Button size", 16, y - 34, 20, 64, 1, "size", "%d")
+	Slider(panel, "Spacing", 16, y - 62, 0, 20, 1, "spacing", "%d")
+	Slider(panel, "Scale", 16, y - 90, 0.5, 2, 0.05, "scale", "%.2f")
+	ResetButton(panel, 16, y - 122)
 
-	Slider(panel, "Button size", 24, -160, 20, 64, 1, "size", "%d")
-	Slider(panel, "Spacing", 24, -206, 0, 20, 1, "spacing", "%d")
-	Slider(panel, "Scale", 24, -252, 0.5, 2, 0.05, "scale", "%.2f")
+	Header(panel, "Behaviour", 16, -250)
+	y = -282
+	local function check(label, get, set, tip)
+		Checkbox(panel, label, 16, y, get, set, tip)
+		y = y - 26
+	end
+	check("Lock bar", function() return db.locked end, function(v) ns.SetLocked(v) end)
+	check("Hide empty buttons", function() return db.hideEmpty end, function(v) db.hideEmpty = v; ns.ApplySettings() end)
+	check("Show item counts", function() return db.showCount end, function(v) db.showCount = v; ns.ApplySettings() end)
+	check("Show tooltips", function() return db.showTooltip end, function(v) db.showTooltip = v end)
+	check("Check friendly target", function() return db.scanTarget end, function(v) db.scanTarget = v; ns.ApplySettings() end)
+	Dropdown(panel, 16, y, "activeMode", ACTIVE_CHOICES, function(v) db.activeMode = v; ns.ApplySettings() end)
+	Dropdown(panel, 16, y - 32, "stackPref", STACK_CHOICES, function(v) db.stackPref = v; ns.Refresh(true, false) end)
 
-	-- Behaviour
-	Header(panel, "Behaviour", 16, -300)
-	Checkbox(panel, "Lock bar", 16, -326,
-		function() return db.locked end, function(v) ns.SetLocked(v) end)
-	Checkbox(panel, "Hide empty buttons", 16, -352,
-		function() return db.hideEmpty end, function(v) db.hideEmpty = v; ns.ApplySettings() end)
-	Checkbox(panel, "Show item counts", 16, -378,
-		function() return db.showCount end, function(v) db.showCount = v; ns.ApplySettings() end)
-	Checkbox(panel, "Show tooltips", 16, -404,
-		function() return db.showTooltip end, function(v) db.showTooltip = v end)
-	Checkbox(panel, "Check friendly target", 16, -430,
-		function() return db.scanTarget end, function(v) db.scanTarget = v; ns.ApplySettings() end)
-	Dropdown(panel, 8, -454, "activeMode", ACTIVE_CHOICES, function(v) db.activeMode = v; ns.ApplySettings() end)
-	Dropdown(panel, 8, -486, "stackPref", STACK_CHOICES, function(v) db.stackPref = v; ns.Refresh(true, false) end)
-
-	-- Categories
-	Header(panel, "Buttons", 330, -70)
+	-- Right column: which buttons show, then the individual class buffs
+	Header(panel, "Buttons", 330, -64, 270)
 	for i, g in ipairs(ns.GROUPS) do
-		Checkbox(panel, g.label, 330, -96 - (i - 1) * 26,
+		Checkbox(panel, g.label, 330, -96 - (i - 1) * 24,
 			function() return db.show[g.key] end,
 			function(v) db.show[g.key] = v; ns.ApplySettings() end,
-			GROUP_TIPS[g.key])
+			GROUP_TIPS[g.key], 170)
 	end
 
 	-- Individual class buffs. These are account-wide, so any class can be edited from any character.
@@ -301,14 +339,16 @@ function ns.BuildOptions()
 	table.sort(classChoices, function(a, b) return a.text < b.text end)
 	local pickedClass = ns.CLASS_BUFFS[ns.CLASS] and #ns.CLASS_BUFFS[ns.CLASS] > 0 and ns.CLASS or classChoices[1].value
 
-	Header(panel, "Class buffs", 330, -310)
+	local classTop = -96 - #ns.GROUPS * 24 - 14
+	Header(panel, "Class buffs", 330, classTop, 270)
 	local rows = {}
 	local function families() return ns.CLASS_BUFFS[pickedClass] or {} end
-	Dropdown(panel, 322, -336, "classPick", classChoices, function(v)
+	-- the class picker sits in the same label/control columns as the Buttons rows
+	Dropdown(panel, 330, classTop - 34, "classPick", classChoices, function(v)
 		pickedClass = v
-	end, function() return pickedClass end)
+	end, function() return pickedClass end, 170)
 	for r = 1, ns.MAX_CLASS_SLOTS do
-		rows[r] = Checkbox(panel, "", 330, -372 - (r - 1) * 26,
+		rows[r] = Checkbox(panel, "", 330, classTop - 68 - (r - 1) * 24,
 			function()
 				local f = families()[r]
 				return f and not db.hiddenBuffs[f[1]]
@@ -318,20 +358,14 @@ function ns.BuildOptions()
 				if f then db.hiddenBuffs[f[1]] = (not v) or nil end
 				ns.ApplySettings()
 			end,
-			"Show or hide this buff on the bar. Handy for short buffs you already press in combat.")
+			"Show or hide this buff on the bar. Handy for short buffs you already press in combat.", 170)
 		refreshers[#refreshers + 1] = function()
 			local f = families()[r]
+			rows[r].label:SetShown(f ~= nil)
 			rows[r]:SetShown(f ~= nil)
-			if f then rows[r].label:SetText(table.concat(f, " / ")) end
+			if f then rows[r].label:SetText(f[1]) end
 		end
 	end
-
-	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	reset:SetSize(140, 24)
-	reset:SetPoint("TOPLEFT", 16, -500)
-	reset:SetText("Reset position")
-	Tip(reset, "Reset position", TIPS.reset)
-	reset:SetScript("OnClick", function() ns.ResetPosition() end)
 
 	-- The settings window can show the panel without a usable OnShow, so sync on
 	-- every hook it offers and once up front.
