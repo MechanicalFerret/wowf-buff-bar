@@ -1,21 +1,73 @@
 local ADDON, ns = ...
 
-local CLASS = select(2, UnitClass("player"))
+local _, CLASS = UnitClass("player")
 
--- Class buffs: one slot per family, each family lists alternative spells in priority order.
--- Spells are cast by name so the game always uses your highest known rank.
+-- Class buffs: one slot per entry. An entry lists the spell's names (a later name is used when an
+-- earlier one isn't known, e.g. a renamed rank). Spells are cast by name so the game always uses
+-- your highest known rank. `exclusive` ties entries together that can't be up at the same time
+-- (armors, aspects, blessings, shields): when any of them is on you, all of them count as active.
+-- `ally` marks buffs that can be cast on other players: with a friendly target selected the button
+-- reflects whether that target has the buff. `weapon` marks weapon imbues, which are tracked on the weapon instead of as an aura.
 local CLASS_BUFFS = {
 	WARRIOR = { { "Battle Shout" } },
-	PRIEST = { { "Power Word: Fortitude" }, { "Divine Spirit" }, { "Shadow Protection" }, { "Inner Fire" } },
-	MAGE = { { "Arcane Intellect" }, { "Mage Armor", "Ice Armor", "Frost Armor" } },
-	DRUID = { { "Mark of the Wild" }, { "Thorns" }, { "Omen of Clarity" } },
-	PALADIN = { { "Blessing of Might" }, { "Blessing of Wisdom" }, { "Blessing of Kings" }, { "Blessing of Salvation" } },
-	SHAMAN = { { "Lightning Shield", "Water Shield" } },
-	WARLOCK = { { "Fel Armor", "Demon Armor", "Demon Skin" }, { "Unending Breath" } },
-	HUNTER = { { "Aspect of the Hawk", "Aspect of the Dragonhawk" }, { "Trueshot Aura" } },
+	PRIEST = { { "Power Word: Fortitude", ally = true }, { "Divine Spirit", ally = true }, { "Shadow Protection", ally = true }, { "Inner Fire" } },
+	MAGE = {
+		{ "Arcane Intellect", ally = true },
+		{ "Mage Armor", exclusive = "armor" },
+		{ "Ice Armor", "Frost Armor", exclusive = "armor" },
+	},
+	DRUID = { { "Mark of the Wild", ally = true }, { "Thorns", ally = true }, { "Omen of Clarity" } },
+	PALADIN = {
+		{ "Blessing of Might", exclusive = "blessing", ally = true },
+		{ "Blessing of Wisdom", exclusive = "blessing", ally = true },
+		{ "Blessing of Kings", exclusive = "blessing", ally = true },
+		{ "Blessing of Salvation", exclusive = "blessing", ally = true },
+	},
+	SHAMAN = {
+		{ "Lightning Shield", "Water Shield", exclusive = "shield" },
+		{ "Rockbiter Weapon", weapon = true },
+		{ "Flametongue Weapon", weapon = true },
+		{ "Frostbrand Weapon", weapon = true },
+		{ "Windfury Weapon", weapon = true },
+	},
+	WARLOCK = {
+		{ "Fel Armor", exclusive = "armor" },
+		{ "Demon Armor", "Demon Skin", exclusive = "armor" },
+		{ "Unending Breath", ally = true },
+	},
+	HUNTER = {
+		{ "Aspect of the Hawk", "Aspect of the Dragonhawk", exclusive = "aspect" },
+		{ "Aspect of the Monkey", exclusive = "aspect" },
+		{ "Aspect of the Cheetah", exclusive = "aspect" },
+		{ "Aspect of the Pack", exclusive = "aspect" },
+		{ "Aspect of the Beast", exclusive = "aspect" },
+		{ "Aspect of the Wild", exclusive = "aspect" },
+		{ "Aspect of the Viper", exclusive = "aspect" },
+		{ "Trueshot Aura" },
+	},
 	ROGUE = {},
 }
-local MAX_CLASS_SLOTS = 4
+
+-- every spell name in each exclusive group, for the player's class
+local EXCLUSIVE_NAMES = {}
+for _, entry in ipairs(CLASS_BUFFS[CLASS] or {}) do
+	if entry.exclusive then
+		local list = EXCLUSIVE_NAMES[entry.exclusive] or {}
+		EXCLUSIVE_NAMES[entry.exclusive] = list
+		for _, n in ipairs(entry) do list[#list + 1] = n end
+	end
+end
+-- Tracking spells from professions and racials (Find Minerals/Herbs/Fish: Mining, Herbalism, Fishing;
+-- Find Treasure: Dwarf). Each button counts as active only while its own tracking is on, so you can switch.
+local TRACKING = {
+	{ "Find Minerals" },
+	{ "Find Herbs" },
+	{ "Find Fish" },
+	{ "Find Treasure" },
+}
+-- one slot per entry in the longest class list
+local MAX_CLASS_SLOTS = 0
+for _, list in pairs(CLASS_BUFFS) do MAX_CLASS_SLOTS = math.max(MAX_CLASS_SLOTS, #list) end
 
 -- Scroll stat (as written in the tooltip) -> slot
 local SCROLL_STATS = {
@@ -29,6 +81,9 @@ local SCROLL_STATS = {
 local SCROLL_SLOT = {}
 for _, s in ipairs(SCROLL_STATS) do SCROLL_SLOT[s.stat] = s.key end
 
+-- "Scroll of Protection" -> armor (the name uses a different word than the tooltip)
+local SCROLL_NAME_STAT = { protection = "armor" }
+
 -- Settings groups (one checkbox each)
 local GROUPS = {
 	{ key = "class", label = "Class buffs" },
@@ -39,6 +94,7 @@ local GROUPS = {
 	{ key = "weaponBuff", label = "Weapon buffs" },
 	{ key = "buffPotion", label = "Buff potions" },
 	{ key = "other", label = "Other buffs" },
+	{ key = "tracking", label = "Tracking (Find Minerals, ...)" },
 }
 
 -- Bar order. Item slots are filled from your bags, class slots from your spellbook.
@@ -51,6 +107,7 @@ for _, s in ipairs(SCROLL_STATS) do SLOTS[#SLOTS + 1] = { key = s.key, group = "
 SLOTS[#SLOTS + 1] = { key = "weaponBuff", group = "weaponBuff", label = "Weapon buff" }
 SLOTS[#SLOTS + 1] = { key = "buffPotion", group = "buffPotion", label = "Buff Potion" }
 SLOTS[#SLOTS + 1] = { key = "other", group = "other", label = "Other buff" }
+for i = 1, #TRACKING do SLOTS[#SLOTS + 1] = { key = "track" .. i, group = "tracking", label = TRACKING[i][1], spell = true } end
 
 local EMPTY_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
@@ -63,7 +120,9 @@ local DEFAULTS = {
 	hideEmpty = true,
 	showCount = true,
 	showTooltip = true,
-	showActive = true, -- dim a buff that is already on you and show its time left
+	scanTarget = true, -- check a friendly target for ally-castable buffs instead of yourself
+	activeMode = "DIM", -- a buff already on you: DIM (dim + time left), HIDE (hide its button), OFF (ignore)
+	hiddenBuffs = {}, -- class buff family -> true when the player turned it off
 	stackPref = "SMALL", -- tie between equal items: SMALL uses up the smaller stack first, LARGE the larger
 	show = {},
 	pos = { 0, -250 }, -- anchor edge: x, y from the screen centre, in UIParent units
@@ -113,7 +172,8 @@ end
 local db
 local bar
 local buttons = {}
-local slots = {} -- slot key -> { itemID=, aura= } or { spellID=, spellName=, aura= }
+local itemSlots = {} -- slot key -> { itemID=, aura= }, filled from the bags
+local spellSlots = {} -- slot key -> { spellID=, spellName=, aura= }, filled from the spellbook
 local misses = {} -- itemID -> failed tooltip reads
 local analysis = {} -- itemID -> { cat=, rank=, aura= } (false when not a candidate)
 local needsRetry = false
@@ -123,6 +183,7 @@ local retries = 0
 local function Movable() return editMode or not db.locked end
 
 ns.GROUPS, ns.SLOTS, ns.DEFAULTS = GROUPS, SLOTS, DEFAULTS
+ns.CLASS, ns.CLASS_BUFFS, ns.MAX_CLASS_SLOTS = CLASS, CLASS_BUFFS, MAX_CLASS_SLOTS
 
 local function CopyDefaults(dst, src)
 	for k, v in pairs(src) do
@@ -208,10 +269,22 @@ local function Analyze(id)
 			end
 		end
 		rank = itemRank
-	elseif subclass == SUB_SCROLL then
-		local stat, amount = useText:match("increases your (%a+) by (%d+)")
-		if not stat then stat, amount = useText:match("increases (%a+) by (%d+)") end
-		if stat and SCROLL_SLOT[stat] then cat, rank = SCROLL_SLOT[stat], tonumber(amount) end
+	elseif subclass == SUB_SCROLL or name:lower():find("^scroll of ") then
+		-- stat and amount from the tooltip ("increases your armor by 300"), else from the name
+		local stat, amount
+		for s in pairs(SCROLL_SLOT) do
+			amount = useText:match("increases[%a%s]-" .. s .. "[%a%s]- by (%d+)")
+			if amount then
+				stat = s
+				break
+			end
+		end
+		if not stat then
+			local word = name:lower():match("^scroll of (%a+)")
+			stat = word and (SCROLL_NAME_STAT[word] or word)
+			amount = useText:match("by (%d+)")
+		end
+		if stat and SCROLL_SLOT[stat] then cat, rank = SCROLL_SLOT[stat], tonumber(amount) or itemRank end
 	elseif useText:find("weapon", 1, true) then
 		cat, rank = "weaponBuff", itemRank
 	elseif subclass == SUB_POTION then
@@ -231,24 +304,23 @@ local function Analyze(id)
 		return false
 	end
 
-	local result = { cat = cat, rank = rank, aura = (GetItemSpell and GetItemSpell(id)) or name }
+	local result = { cat = cat, rank = rank, minLevel = minLevel or 0, aura = (GetItemSpell and GetItemSpell(id)) or name }
 	analysis[id] = result
 	return result
 end
 
-local function Scan()
-	local best = {}
-	local function consider(cat, id, value, aura)
-		local cur = best[cat]
-		-- exact ties: stack size decides (smaller first unless set to LARGE)
-		local better = not cur or value > cur.value
-		if not better and value == cur.value then
-			local n, curN = GetItemCount(id) or 0, GetItemCount(cur.id) or 0
-			better = db.stackPref == "LARGE" and n > curN or db.stackPref ~= "LARGE" and n < curN
-		end
-		if better then best[cat] = { id = id, value = value, aura = aura } end
+-- First spell of a family the player knows: spellID, name
+local function FirstKnown(family)
+	for _, spellName in ipairs(family) do
+		local id = SpellIDByName(spellName)
+		if id and SpellKnown(id) then return id, spellName end
 	end
+end
 
+-- Bag contents -> one best item per category
+local function ScanItems()
+	needsRetry = false
+	local best = {}
 	local playerLevel = UnitLevel("player")
 	local seen = {}
 	for bag = 0, (NUM_BAG_SLOTS or 4) do
@@ -257,59 +329,109 @@ local function Scan()
 			if id and not seen[id] then
 				seen[id] = true
 				local info = Analyze(id)
-				if info then
-					local _, _, _, _, minLevel = GetItemInfo(id)
-					if (minLevel or 0) <= playerLevel then consider(info.cat, id, info.rank, info.aura) end
+				if info and info.minLevel <= playerLevel then
+					local cur = best[info.cat]
+					-- exact ties: stack size decides (smaller first unless set to LARGE)
+					local better = not cur or info.rank > cur.rank
+					if not better and info.rank == cur.rank then
+						local n, curN = GetItemCount(id) or 0, GetItemCount(cur.id) or 0
+						better = db.stackPref == "LARGE" and n > curN or db.stackPref ~= "LARGE" and n < curN
+					end
+					if better then best[info.cat] = { id = id, rank = info.rank, aura = info.aura } end
 				end
 			end
 		end
 	end
+	wipe(itemSlots)
+	for cat, b in pairs(best) do itemSlots[cat] = { itemID = b.id, aura = b.aura } end
+end
 
-	wipe(slots)
-	for cat, b in pairs(best) do slots[cat] = { itemID = b.id, aura = b.aura } end
-
+-- Spellbook -> class buffs and tracking spells the player knows
+local function ScanSpells()
+	wipe(spellSlots)
 	for i, family in ipairs(CLASS_BUFFS[CLASS] or {}) do
-		if i > MAX_CLASS_SLOTS then break end
-		for _, spellName in ipairs(family) do
-			local id = SpellIDByName(spellName)
-			if id and SpellKnown(id) then
-				slots["class" .. i] = { spellID = id, spellName = spellName, aura = spellName }
-				break
-			end
+		local id, name = FirstKnown(family)
+		if id then
+			spellSlots["class" .. i] = { spellID = id, spellName = name, aura = name, familyKey = family[1],
+				weapon = family.weapon, ally = family.ally, exclusive = family.exclusive }
 		end
+	end
+	for i, family in ipairs(TRACKING) do
+		local id, name = FirstKnown(family)
+		if id then spellSlots["track" .. i] = { spellID = id, spellName = name, aura = name, familyKey = family[1] } end
 	end
 end
 
 ---------------------------------------------------------------------------
 -- Active buff state
 ---------------------------------------------------------------------------
-local function FindAura(name)
-	if C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
-		local d = C_UnitAuras.GetAuraDataBySpellName("player", name, "HELPFUL")
-		if d then return true, d.expirationTime end
-		return false
+-- Auras are read once per unit per update pass (BeginPass) into name -> expiration, so checking
+-- every button is a table lookup.
+local passAuras, passTarget = {}, false
+
+local function ReadAuras(unit)
+	local t = {}
+	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+		for i = 1, 64 do
+			local d = C_UnitAuras.GetAuraDataByIndex(unit, i, "HELPFUL")
+			if not d then break end
+			if d.name and t[d.name] == nil then t[d.name] = d.expirationTime or 0 end
+		end
+	else
+		for i = 1, 64 do
+			local n, _, _, _, _, exp = UnitBuff(unit, i)
+			if not n then break end
+			if t[n] == nil then t[n] = exp or 0 end
+		end
 	end
-	if AuraUtil and AuraUtil.FindAuraByName then
-		local n, _, _, _, _, exp = AuraUtil.FindAuraByName(name, "player", "HELPFUL")
-		if n then return true, exp end
-		return false
-	end
-	return false
+	return t
+end
+
+local function BeginPass()
+	passAuras = {}
+	-- a friendly player (not you) is targeted: ally-castable buffs are checked on them
+	passTarget = db.scanTarget and UnitExists("target") and UnitIsPlayer("target") and not UnitIsUnit("target", "player")
+		and UnitCanAssist("player", "target") and not UnitIsDeadOrGhost("target") and true or false
 end
 
 -- Returns active, secondsLeft (nil for no timer)
+local function AuraState(unit, name)
+	local auras = passAuras[unit]
+	if not auras then
+		auras = ReadAuras(unit)
+		passAuras[unit] = auras
+	end
+	local expires = auras[name]
+	if expires == nil then return false end
+	if expires > 0 then return true, expires - GetTime() end
+	return true
+end
+
+-- Weapon imbues, oils, stones and poisons all share the weapon's one temporary enchant, so
+-- they count as active once every weapon you could enchant already has one.
+local function WeaponsBuffed()
+	local hasMain, mainExp, _, _, hasOff, offExp = GetWeaponEnchantInfo()
+	if not hasMain then return false end
+	local dual = OffhandHasWeapon and OffhandHasWeapon()
+	if dual and not hasOff then return false end
+	local left = mainExp and mainExp / 1000
+	if dual and offExp and (not left or offExp / 1000 < left) then left = offExp / 1000 end
+	return true, left
+end
+
 local function IsActive(b)
-	if b.key == "weaponBuff" then
-		local hasMain, mainExp, _, _, hasOff, offExp = GetWeaponEnchantInfo()
-		if hasMain then return true, mainExp and mainExp / 1000 end
-		if hasOff then return true, offExp and offExp / 1000 end
+	if b.key == "weaponBuff" or b.weaponImbue then return WeaponsBuffed() end
+	if b.ally and passTarget then return AuraState("target", b.aura) end
+	if b.exclusive then
+		-- any member of the group being up counts for all of them
+		for _, name in ipairs(EXCLUSIVE_NAMES[b.exclusive] or {}) do
+			local active, left = AuraState("player", name)
+			if active then return true, left end
+		end
 		return false
 	end
 	if not b.aura then return false end
-	local found, expires = FindAura(b.aura)
-	if not found then return false end
-	if expires and expires > 0 then return true, expires - GetTime() end
-	return true
+	return AuraState("player", b.aura)
 end
 
 local function FormatTime(sec)
@@ -318,14 +440,51 @@ local function FormatTime(sec)
 	return string.format("%d", math.max(sec, 0))
 end
 
--- Dims a buff that is already on you and shows its time left. Never in combat.
-local function UpdateActive(b)
-	if InCombatLockdown() then return end
-	if not (b.itemID or b.spellID) then return end
-	local active, remaining = false, nil
-	if db.showActive then active, remaining = IsActive(b) end
+-- Sets b.active (never in combat; a failed read counts as inactive). Needs BeginPass first.
+local function Evaluate(b)
+	if db.activeMode == "OFF" or InCombatLockdown() or not (b.itemID or b.spellID) then
+		b.active = false
+		return false
+	end
+	local ok, active, remaining = pcall(IsActive, b)
+	b.active = ok and active or false
+	return b.active, remaining
+end
+
+-- The countdown text is the only thing that needs a timer. Gaining or losing a buff is
+-- event driven, so the ticker only runs while a countdown is on screen, once a second.
+local Layout, UpdateActiveStates -- defined below
+local ticking = false
+local function SyncTicker(need)
+	if need and not ticking then
+		ticking = true
+		local acc = 0
+		bar:SetScript("OnUpdate", function(_, elapsed)
+			acc = acc + elapsed
+			if acc < 1 then return end
+			acc = 0
+			UpdateActiveStates()
+		end)
+	elseif not need and ticking then
+		ticking = false
+		bar:SetScript("OnUpdate", nil)
+	end
+end
+
+-- DIM mode: dims a buff that is already on you (or your target) and shows its time left.
+-- Returns true while a countdown is shown. Other modes never dim.
+local function ApplyActive(b)
+	if InCombatLockdown() or not (b.itemID or b.spellID) then return false end
+	if db.activeMode ~= "DIM" then
+		b.icon:SetAlpha(1)
+		b.timer:SetText("")
+		return false
+	end
+	local active, remaining = Evaluate(b)
 	b.icon:SetAlpha(active and 0.45 or 1)
-	b.timer:SetText((active and remaining) and FormatTime(remaining) or "")
+	local showTime = active and remaining
+	b.timer:SetText(showTime and FormatTime(remaining) or "")
+	return showTime and true or false
 end
 
 ---------------------------------------------------------------------------
@@ -407,32 +566,33 @@ local function CreateButton(slot)
 	return b
 end
 
+local function UpdateCooldown(b)
+	local start, duration
+	if b.itemID then
+		start, duration = GetItemCooldown(b.itemID)
+	elseif b.spellID then
+		start, duration = SpellCooldown(b.spellID)
+	else
+		return
+	end
+	if start and duration and duration > 0 then
+		b.cooldown:SetCooldown(start, duration)
+	else
+		b.cooldown:Clear()
+	end
+end
+
+-- Icon, count and cooldown (the active/dim state is ApplyActive's job)
 local function UpdateButton(b)
 	local id = b.itemID
 	if id then
 		local _, _, _, _, icon = GetItemInfoInstant(id)
 		b.icon:SetTexture(icon)
-		b.icon:SetDesaturated(false)
-		b.icon:SetAlpha(1)
-		local n = GetItemCount(id) or 0
-		b.count:SetText((db.showCount and n > 1) and n or "")
-		local start, duration = GetItemCooldown(id)
-		if start and duration and duration > 0 then
-			b.cooldown:SetCooldown(start, duration)
-		else
-			b.cooldown:Clear()
-		end
+		local n = db.showCount and GetItemCount(id) or 0
+		b.count:SetText(n > 1 and n or "")
 	elseif b.spellID then
 		b.icon:SetTexture(SpellTexture(b.spellID))
-		b.icon:SetDesaturated(false)
-		b.icon:SetAlpha(1)
 		b.count:SetText("")
-		local start, duration = SpellCooldown(b.spellID)
-		if start and duration and duration > 0 then
-			b.cooldown:SetCooldown(start, duration)
-		else
-			b.cooldown:Clear()
-		end
 	else
 		b.icon:SetTexture(EMPTY_ICON)
 		b.icon:SetDesaturated(true)
@@ -442,7 +602,9 @@ local function UpdateButton(b)
 		b.cooldown:Clear()
 		return
 	end
-	pcall(UpdateActive, b)
+	b.icon:SetDesaturated(false)
+	b.icon:SetAlpha(1)
+	UpdateCooldown(b)
 end
 ns.UpdateButton = UpdateButton
 
@@ -460,6 +622,12 @@ local function SetClickAttributes(b)
 			b:SetAttribute("type", "item")
 			b:SetAttribute("item", "item:" .. b.itemID)
 		end
+	elseif b.spellName and b.weaponImbue then
+		-- imbues go on your own weapon: left click main hand, right click off hand
+		b:SetAttribute("type", "macro")
+		b:SetAttribute("macrotext", "/cast " .. b.spellName)
+		b:SetAttribute("type2", "macro")
+		b:SetAttribute("macrotext2", "/cast " .. b.spellName .. "\n/use 17")
 	elseif b.spellName then
 		b:SetAttribute("type", "macro")
 		b:SetAttribute("macrotext", "/cast [@target,help,nodead][@player] " .. b.spellName)
@@ -468,27 +636,39 @@ end
 
 -- Resizes, repositions and re-targets the secure buttons. Protected, so never in combat.
 local needsLayout = false
-local function Layout()
+local function SlotData(slot) return (slot.spell and spellSlots or itemSlots)[slot.key] end
+
+function Layout()
 	if InCombatLockdown() then
 		needsLayout = true
 		return
 	end
 	needsLayout = false
+	BeginPass()
 
 	local size, spacing = db.size, db.spacing
 	bar:SetScale(db.scale)
 	ApplyPosition()
 
-	local shown = 0
+	local shown, needTicker = 0, false
+	local hideActive = db.activeMode == "HIDE" and not Movable()
 	for _, slot in ipairs(SLOTS) do
 		local b = buttons[slot.key]
-		local s = slots[slot.key]
+		local s = SlotData(slot)
 		b.itemID = s and s.itemID
 		b.spellID = s and s.spellID
 		b.spellName = s and s.spellName
 		b.aura = s and s.aura
+		b.weaponImbue = s and s.weapon
+		b.exclusive = s and s.exclusive
+		b.ally = s and s.ally
+		-- HIDE mode: a buff that is already on you leaves the bar until it fades
+		if s and hideActive then Evaluate(b) else b.active = false end
 		-- class slots only ever appear when you know the spell
-		local visible = db.show[slot.group] and (s or (not db.hideEmpty and not slot.spell))
+		local visible = db.show[slot.group]
+			and (s or (not db.hideEmpty and not slot.spell))
+			and not (slot.spell and s and db.hiddenBuffs[s.familyKey])
+			and not b.active
 		if visible then
 			local offset = shown * (size + spacing)
 			b:ClearAllPoints()
@@ -505,12 +685,14 @@ local function Layout()
 			SetClickAttributes(b)
 			b:Show()
 			shown = shown + 1
+			UpdateButton(b)
+			if ApplyActive(b) then needTicker = true end
 		else
 			b:Hide()
-			SetClickAttributes(b)
+			SetClickAttributes(b) -- a hidden button must not keep a stale action
 		end
-		UpdateButton(b)
 	end
+	SyncTicker(needTicker)
 
 	local n = math.max(shown, 1)
 	bar:SetSize(n * size + (n - 1) * spacing, size)
@@ -519,28 +701,67 @@ local function Layout()
 	bar:SetShown(shown > 0 or Movable())
 end
 
-local function Refresh()
+-- Same buttons, fresh icons/counts/cooldowns/active state (no re-layout)
+local function RefreshButtons()
+	if InCombatLockdown() then return end
+	BeginPass()
+	local needTicker = false
+	for _, slot in ipairs(SLOTS) do
+		local b = buttons[slot.key]
+		if b:IsShown() then
+			UpdateButton(b)
+			if ApplyActive(b) then needTicker = true end
+		end
+	end
+	SyncTicker(needTicker)
+end
+
+-- What is on the bar, so an unchanged bar skips the re-layout
+local lastSignature
+local function Signature()
+	local t = {}
+	for i, slot in ipairs(SLOTS) do
+		local s = SlotData(slot)
+		t[i] = s and (s.itemID or s.spellID) or 0
+	end
+	return table.concat(t, ",")
+end
+
+-- items / spells: which scans to redo
+local function Refresh(items, spells)
 	-- nothing touches bags, tooltips or auras in combat; PLAYER_REGEN_ENABLED re-runs this
 	if InCombatLockdown() then return end
-	needsRetry = false
-	Scan()
-	Layout()
+	if items then ScanItems() end
+	if spells then ScanSpells() end
+	local sig = Signature()
+	if sig ~= lastSignature or needsLayout then
+		lastSignature = sig
+		Layout()
+	else
+		RefreshButtons()
+	end
 	if needsRetry and retries < 15 then
 		retries = retries + 1
-		C_Timer.After(1, ns.Refresh)
+		C_Timer.After(1, function() ns.Refresh(true, false) end)
 	elseif not needsRetry then
 		retries = 0
 	end
 end
 
-local pending
-function ns.Refresh()
+-- Debounced; no arguments rescans everything
+local pending, pendingItems, pendingSpells
+function ns.Refresh(items, spells)
 	if not db or InCombatLockdown() then return end
+	if items == nil and spells == nil then items, spells = true, true end
+	pendingItems = pendingItems or items
+	pendingSpells = pendingSpells or spells
 	if pending then return end
 	pending = true
 	C_Timer.After(0.1, function()
-		pending = nil
-		Refresh()
+		pending = false
+		local i, sp = pendingItems, pendingSpells
+		pendingItems, pendingSpells = nil, nil
+		Refresh(i, sp)
 	end)
 end
 
@@ -573,11 +794,47 @@ function ns.SetLocked(locked)
 	Layout()
 end
 
+-- Re-reads auras: dims buttons, or re-lays-out when buffs come and go in HIDE mode
+function UpdateActiveStates()
+	if not db or not bar or InCombatLockdown() then return end
+	BeginPass()
+	if db.activeMode == "HIDE" and not Movable() then
+		local changed = false
+		for _, slot in ipairs(SLOTS) do
+			local b = buttons[slot.key]
+			if b.itemID or b.spellID then
+				local was = b.active and true or false
+				Evaluate(b)
+				if (b.active and true or false) ~= was then changed = true end
+			end
+		end
+		if changed then Layout() end
+		return
+	end
+	local needTicker = false
+	for _, slot in ipairs(SLOTS) do
+		local b = buttons[slot.key]
+		if b:IsShown() and ApplyActive(b) then needTicker = true end
+	end
+	SyncTicker(needTicker)
+end
+
+-- Aura events come in bursts, so they are folded into one update
+local activePending = false
+function ns.UpdateAllActive()
+	if activePending then return end
+	activePending = true
+	C_Timer.After(0.05, function()
+		activePending = false
+		UpdateActiveStates()
+	end)
+end
+
 local function UpdateCooldowns()
 	if InCombatLockdown() then return end
 	for _, slot in ipairs(SLOTS) do
 		local b = buttons[slot.key]
-		if b:IsShown() then UpdateButton(b) end
+		if b:IsShown() then UpdateCooldown(b) end
 	end
 end
 
@@ -648,19 +905,6 @@ local function Build()
 	for _, slot in ipairs(SLOTS) do buttons[slot.key] = CreateButton(slot) end
 	ApplyPosition()
 
-	-- time left on active buffs
-	local acc = 0
-	bar:SetScript("OnUpdate", function(_, elapsed)
-		acc = acc + elapsed
-		if acc < 0.5 then return end
-		acc = 0
-		if InCombatLockdown() then return end
-		for _, slot in ipairs(SLOTS) do
-			local b = buttons[slot.key]
-			if b:IsShown() then pcall(UpdateActive, b) end
-		end
-	end)
-
 	-- Show the drag overlay whenever the game's Edit Mode is open
 	if EditModeManagerFrame then
 		local function sync(active)
@@ -683,7 +927,7 @@ function ns.Debug()
 	local function p(...) print("|cff33ff99BBar:|r", ...) end
 	p("retry pending:", tostring(needsRetry), "retries:", retries, "level:", UnitLevel("player"), "class:", tostring(CLASS))
 	for _, slot in ipairs(SLOTS) do
-		local s = slots[slot.key]
+		local s = SlotData(slot)
 		if s then
 			p(slot.key, "->", s.itemID and ("item " .. s.itemID) or ("spell " .. tostring(s.spellName)), "aura:", tostring(s.aura))
 		end
@@ -715,30 +959,39 @@ events:SetScript("OnEvent", function(_, event, arg1)
 		if arg1 ~= ADDON then return end
 		BuffBarDB = BuffBarDB or {}
 		db = BuffBarDB
+		if db.activeMode == nil and db.showActive == false then db.activeMode = "OFF" end
+		db.showActive = nil
 		CopyDefaults(db, DEFAULTS)
 		events:UnregisterEvent("ADDON_LOADED")
 		Build()
 		-- pcall: an event this client doesn't know must not stop the rest registering
 		for _, e in ipairs({
-			"PLAYER_ENTERING_WORLD", "PLAYER_LEVEL_UP", "PLAYER_REGEN_ENABLED",
+			"PLAYER_ENTERING_WORLD", "PLAYER_LEVEL_UP", "PLAYER_REGEN_ENABLED", "PLAYER_TARGET_CHANGED",
 			"GET_ITEM_INFO_RECEIVED", "BAG_UPDATE_COOLDOWN", "SPELL_UPDATE_COOLDOWN", "SPELLS_CHANGED",
-			-- any way an item can arrive, leave or move
-			"BAG_UPDATE", "BAG_UPDATE_DELAYED", "ITEM_PUSH", "BAG_NEW_ITEMS_UPDATED",
-			"UNIT_INVENTORY_CHANGED", "ITEM_LOCK_CHANGED",
+			"BAG_UPDATE_DELAYED", -- fires once after any change to what is in the bags
+			"UNIT_INVENTORY_CHANGED", -- weapon enchants
+			"UNIT_AURA",
 		}) do
 			pcall(events.RegisterEvent, events, e)
 		end
 		if ns.BuildOptions then ns.BuildOptions() end
-	elseif event == "UNIT_INVENTORY_CHANGED" and arg1 ~= "player" then
-		return
+	elseif event == "UNIT_AURA" then
+		if arg1 == "player" or (arg1 == "target" and db.scanTarget) then ns.UpdateAllActive() end
+	elseif event == "PLAYER_TARGET_CHANGED" then
+		if db.scanTarget then ns.UpdateAllActive() end
+	elseif event == "UNIT_INVENTORY_CHANGED" then
+		if arg1 == "player" then ns.UpdateAllActive() end
 	elseif event == "BAG_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_COOLDOWN" then
 		UpdateCooldowns()
-	elseif event == "PLAYER_REGEN_ENABLED" then
-		ns.Refresh()
+	elseif event == "BAG_UPDATE_DELAYED" then
+		ns.Refresh(true, false)
+	elseif event == "SPELLS_CHANGED" then
+		ns.Refresh(false, true)
 	elseif event == "GET_ITEM_INFO_RECEIVED" then
 		-- only matters while we are waiting on item data
-		if needsRetry then ns.Refresh() end
+		if needsRetry then ns.Refresh(true, false) end
 	else
+		-- login, level up, leaving combat: rescan everything
 		if event == "PLAYER_ENTERING_WORLD" then
 			-- bags and item data can still be filling in right after login
 			C_Timer.After(3, ns.Refresh)

@@ -16,13 +16,15 @@ local TIPS = {
 	["Hide empty buttons"] = "Hides buttons that have nothing in your bags. When off, empty buttons show dimmed.",
 	["Show item counts"] = "Shows how many of each item you carry on its button.",
 	["Show tooltips"] = "Shows the item or ability tooltip when you hover a button.",
-	["Show active buffs"] = "Dims a buff that is already on you and shows how long it has left. Not updated in combat.",
+	["Check friendly target"] = "With a friendly player selected, buffs you can cast on others (Fortitude, Mark of the Wild, blessings, ...) are checked on your target instead of you, so the button shows when they are missing it. Turn off to always check yourself.",
+	activeMode = "What happens to a buff that is already on you (or on your friendly target, for buffs you can cast on others). Dim keeps the button and shows the time left, Hide removes the button until the buff fades, Ignore does nothing. Buffs are not checked in combat.",
 	size = "Size of each button.",
 	spacing = "Gap between buttons.",
 	scale = "Scales the whole bar.",
 	direction = "Which edge the bar is anchored to. Grow right keeps the left edge fixed, grow left keeps the right edge fixed, so buttons appearing or disappearing extend away from that edge.",
 	stackPref = "When two items are otherwise equal, choose the one you have fewer of (use it up first) or more of.",
 	reset = "Moves the bar back to its default position.",
+	classPick = "Class buffs are saved for the whole account, so you can set them for any class from any character.",
 }
 local GROUP_TIPS = {
 	class = "Your class buffs (Power Word: Fortitude, Battle Shout, Mark of the Wild, ...). Cast on your friendly target, otherwise on you. Only shown for spells you know.",
@@ -33,6 +35,7 @@ local GROUP_TIPS = {
 	weaponBuff = "Shows a weapon oil, stone or poison. Left click applies it to your main hand, right click to your off hand.",
 	buffPotion = "Shows the highest level potion that gives a buff (protection, rage, swiftness and similar), not healing or mana potions.",
 	other = "Shows other buffing consumables, such as juju and zanza.",
+	tracking = "Shows the tracking spells you know from professions and racials: Find Minerals, Find Herbs, Find Fish and Find Treasure.",
 }
 
 local function Tip(frame, title, text)
@@ -55,6 +58,7 @@ local function Checkbox(parent, label, x, y, get, set, tip)
 		text:SetPoint("LEFT", c, "RIGHT", 2, 1)
 	end
 	text:SetText(label)
+	c.label = text
 	c:SetScript("OnClick", function(self)
 		set(self:GetChecked() and true or false)
 		for _, fn in ipairs(refreshers) do fn() end
@@ -102,11 +106,13 @@ local function Slider(parent, label, x, y, min, max, step, key, fmt)
 	return s
 end
 
+local DROPDOWN_LABELS = { direction = "Direction", activeMode = "Active buffs", stackPref = "Stack tie-break", classPick = "Class" }
 local ddCount = 0
 -- choices: { { value =, text = }, ... }; the first one is the default for a missing/unknown value
-local function Dropdown(parent, x, y, key, choices, set)
+local function Dropdown(parent, x, y, key, choices, set, get)
 	local function current()
-		local v = ns.GetDB()[key]
+		local v
+		if get then v = get() else v = ns.GetDB()[key] end
 		for _, c in ipairs(choices) do
 			if c.value == v then return c end
 		end
@@ -131,14 +137,18 @@ local function Dropdown(parent, x, y, key, choices, set)
 	refreshers[#refreshers + 1] = function() UIDropDownMenu_SetText(dd, current().text) end
 	local name = dd:GetName()
 	local button = dd.Button or (name and _G[name .. "Button"])
-	local label = key == "direction" and "Direction" or "Stack tie-break"
-	Tip(button or dd, label, TIPS[key])
+	Tip(button or dd, DROPDOWN_LABELS[key], TIPS[key])
 	return dd
 end
 
 local DIRECTIONS = {
 	{ value = "LTR", text = "Grow right" },
 	{ value = "RTL", text = "Grow left" },
+}
+local ACTIVE_CHOICES = {
+	{ value = "DIM", text = "Active buffs: dim" },
+	{ value = "HIDE", text = "Active buffs: hide" },
+	{ value = "OFF", text = "Active buffs: ignore" },
 }
 local STACK_CHOICES = {
 	{ value = "SMALL", text = "Smaller stacks first" },
@@ -204,6 +214,41 @@ function ns.OpenOptions()
 	end
 end
 
+-- Both bar addons share one "Adaptable Bars" settings category; whichever loads first creates it.
+local PARENT_NAME = "Adaptable Bars"
+
+local function RegisterPanel(panel)
+	local parent = _G.AdaptableBarsCategory
+	if not parent then
+		local home = CreateFrame("Frame")
+		home.name = PARENT_NAME
+		local t = home:CreateFontString(nil, "ARTWORK", "GameFontNormalHuge")
+		t:SetPoint("TOPLEFT", 16, -16)
+		t:SetText(PARENT_NAME)
+		local d = home:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+		d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -8)
+		d:SetText("Pick a bar on the left.")
+		if Settings and Settings.RegisterCanvasLayoutCategory then
+			parent = Settings.RegisterCanvasLayoutCategory(home, PARENT_NAME)
+			Settings.RegisterAddOnCategory(parent)
+			_G.AdaptableBarsCategory = parent
+		elseif InterfaceOptions_AddCategory then
+			InterfaceOptions_AddCategory(home)
+			_G.AdaptableBarsCategory = home
+		end
+	end
+
+	if Settings and Settings.RegisterCanvasLayoutSubcategory and parent and parent.GetID then
+		category = Settings.RegisterCanvasLayoutSubcategory(parent, panel, panel.name)
+	elseif Settings and Settings.RegisterCanvasLayoutCategory then
+		category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
+		Settings.RegisterAddOnCategory(category)
+	elseif InterfaceOptions_AddCategory then
+		panel.parent = PARENT_NAME
+		InterfaceOptions_AddCategory(panel)
+	end
+end
+
 function ns.BuildOptions()
 	local db = ns.GetDB()
 	panel = CreateFrame("Frame")
@@ -231,9 +276,10 @@ function ns.BuildOptions()
 		function() return db.showCount end, function(v) db.showCount = v; ns.ApplySettings() end)
 	Checkbox(panel, "Show tooltips", 16, -404,
 		function() return db.showTooltip end, function(v) db.showTooltip = v end)
-	Checkbox(panel, "Show active buffs", 16, -430,
-		function() return db.showActive end, function(v) db.showActive = v; ns.ApplySettings() end)
-	Dropdown(panel, 8, -458, "stackPref", STACK_CHOICES, function(v) db.stackPref = v; ns.Refresh() end)
+	Checkbox(panel, "Check friendly target", 16, -430,
+		function() return db.scanTarget end, function(v) db.scanTarget = v; ns.ApplySettings() end)
+	Dropdown(panel, 8, -454, "activeMode", ACTIVE_CHOICES, function(v) db.activeMode = v; ns.ApplySettings() end)
+	Dropdown(panel, 8, -486, "stackPref", STACK_CHOICES, function(v) db.stackPref = v; ns.Refresh(true, false) end)
 
 	-- Categories
 	Header(panel, "Buttons", 330, -70)
@@ -244,9 +290,45 @@ function ns.BuildOptions()
 			GROUP_TIPS[g.key])
 	end
 
+	-- Individual class buffs. These are account-wide, so any class can be edited from any character.
+	local classChoices = {}
+	for token, families in pairs(ns.CLASS_BUFFS) do
+		if #families > 0 then
+			local name = (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or token
+			classChoices[#classChoices + 1] = { value = token, text = name }
+		end
+	end
+	table.sort(classChoices, function(a, b) return a.text < b.text end)
+	local pickedClass = ns.CLASS_BUFFS[ns.CLASS] and #ns.CLASS_BUFFS[ns.CLASS] > 0 and ns.CLASS or classChoices[1].value
+
+	Header(panel, "Class buffs", 330, -310)
+	local rows = {}
+	local function families() return ns.CLASS_BUFFS[pickedClass] or {} end
+	Dropdown(panel, 322, -336, "classPick", classChoices, function(v)
+		pickedClass = v
+	end, function() return pickedClass end)
+	for r = 1, ns.MAX_CLASS_SLOTS do
+		rows[r] = Checkbox(panel, "", 330, -372 - (r - 1) * 26,
+			function()
+				local f = families()[r]
+				return f and not db.hiddenBuffs[f[1]]
+			end,
+			function(v)
+				local f = families()[r]
+				if f then db.hiddenBuffs[f[1]] = (not v) or nil end
+				ns.ApplySettings()
+			end,
+			"Show or hide this buff on the bar. Handy for short buffs you already press in combat.")
+		refreshers[#refreshers + 1] = function()
+			local f = families()[r]
+			rows[r]:SetShown(f ~= nil)
+			if f then rows[r].label:SetText(table.concat(f, " / ")) end
+		end
+	end
+
 	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
 	reset:SetSize(140, 24)
-	reset:SetPoint("TOPLEFT", 330, -330)
+	reset:SetPoint("TOPLEFT", 16, -500)
 	reset:SetText("Reset position")
 	Tip(reset, "Reset position", TIPS.reset)
 	reset:SetScript("OnClick", function() ns.ResetPosition() end)
@@ -263,10 +345,5 @@ function ns.BuildOptions()
 	end)
 	refresh()
 
-	if Settings and Settings.RegisterCanvasLayoutCategory then
-		category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
-		Settings.RegisterAddOnCategory(category)
-	elseif InterfaceOptions_AddCategory then
-		InterfaceOptions_AddCategory(panel)
-	end
+	RegisterPanel(panel)
 end
