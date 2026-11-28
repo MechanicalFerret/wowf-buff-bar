@@ -34,6 +34,9 @@ local CLASS_BUFFS = {
 		{ "Fel Armor", exclusive = "armor" },
 		{ "Demon Armor", "Demon Skin", exclusive = "armor" },
 		{ "Unending Breath", ally = true },
+		-- the button creates a Soulstone, then uses the one in your bags; it is active while the
+		-- Soulstone Resurrection buff you cast is on your target, on you, or on a party member
+		{ "Create Soulstone", ally = true, soulstone = true, aura = "Soulstone Resurrection" },
 	},
 	HUNTER = {
 		{ "Aspect of the Hawk", "Aspect of the Dragonhawk", exclusive = "aspect" },
@@ -47,6 +50,12 @@ local CLASS_BUFFS = {
 	},
 	ROGUE = {},
 }
+
+-- Soulstone items, weakest to strongest
+local SOULSTONES = { 5232, 16892, 16893, 16895, 16896, 22116 }
+local SOULSTONE_RANK = {}
+for rank, id in ipairs(SOULSTONES) do SOULSTONE_RANK[id] = rank end
+local soulstoneItem -- best Soulstone in the bags
 
 -- every spell name in each exclusive group, for the player's class
 local EXCLUSIVE_NAMES = {}
@@ -109,6 +118,7 @@ SLOTS[#SLOTS + 1] = { key = "buffPotion", group = "buffPotion", label = "Buff Po
 SLOTS[#SLOTS + 1] = { key = "other", group = "other", label = "Other buff" }
 for i = 1, #TRACKING do SLOTS[#SLOTS + 1] = { key = "track" .. i, group = "tracking", label = TRACKING[i][1], spell = true } end
 
+local CREATE_TINT = { 0.6, 0.45, 1 } -- same tint as ConsumableBar's Create Healthstone button
 local EMPTY_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 local DEFAULTS = {
@@ -121,6 +131,7 @@ local DEFAULTS = {
 	showCount = true,
 	showTooltip = true,
 	scanTarget = true, -- check a friendly target for ally-castable buffs instead of yourself
+	soulstoneParty = true, -- the Soulstone button also counts as active when a party member has your Soulstone
 	activeMode = "DIM", -- a buff already on you: DIM (dim + time left), HIDE (hide its button), OFF (ignore)
 	hiddenBuffs = {}, -- class buff family -> true when the player turned it off
 	stackPref = "SMALL", -- tie between equal items: SMALL uses up the smaller stack first, LARGE the larger
@@ -342,6 +353,10 @@ local function ScanItems()
 			end
 		end
 	end
+	soulstoneItem = nil
+	for id, rank in pairs(SOULSTONE_RANK) do
+		if (GetItemCount(id) or 0) > 0 and (not soulstoneItem or rank > SOULSTONE_RANK[soulstoneItem]) then soulstoneItem = id end
+	end
 	wipe(itemSlots)
 	for cat, b in pairs(best) do itemSlots[cat] = { itemID = b.id, aura = b.aura } end
 end
@@ -352,8 +367,8 @@ local function ScanSpells()
 	for i, family in ipairs(CLASS_BUFFS[CLASS] or {}) do
 		local id, name = FirstKnown(family)
 		if id then
-			spellSlots["class" .. i] = { spellID = id, spellName = name, aura = name, familyKey = family[1],
-				weapon = family.weapon, ally = family.ally, exclusive = family.exclusive }
+			spellSlots["class" .. i] = { spellID = id, spellName = name, aura = family.aura or name, familyKey = family[1],
+				weapon = family.weapon, ally = family.ally, exclusive = family.exclusive, soulstone = family.soulstone }
 		end
 	end
 	for i, family in ipairs(TRACKING) do
@@ -419,7 +434,35 @@ local function WeaponsBuffed()
 	return true, left
 end
 
+-- Does a group member carry a Soulstone cast by you? Only looked at while in a group.
+local function PartyHasMySoulstone(name)
+	if not IsInGroup() then return false end
+	local raid = IsInRaid()
+	local prefix, count = raid and "raid" or "party", raid and GetNumGroupMembers() or GetNumSubgroupMembers()
+	for i = 1, count do
+		local unit = prefix .. i
+		if UnitExists(unit) and not UnitIsUnit(unit, "player") then
+			for j = 1, 64 do
+				local n, src
+				if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+					local d = C_UnitAuras.GetAuraDataByIndex(unit, j, "HELPFUL")
+					if not d then break end
+					n, src = d.name, d.sourceUnit
+				else
+					local caster
+					n, _, _, _, _, _, caster = UnitBuff(unit, j)
+					if not n then break end
+					src = caster
+				end
+				if n == name and src and UnitIsUnit(src, "player") then return true end
+			end
+		end
+	end
+	return false
+end
+
 local function IsActive(b)
+	if b.soulstone and db.soulstoneParty and PartyHasMySoulstone(b.aura) then return true end
 	if b.key == "weaponBuff" or b.weaponImbue then return WeaponsBuffed() end
 	if b.ally and passTarget then return AuraState("target", b.aura) end
 	if b.exclusive then
@@ -585,6 +628,7 @@ end
 -- Icon, count and cooldown (the active/dim state is ApplyActive's job)
 local function UpdateButton(b)
 	local id = b.itemID
+	b.icon:SetVertexColor(1, 1, 1)
 	if id then
 		local _, _, _, _, icon = GetItemInfoInstant(id)
 		b.icon:SetTexture(icon)
@@ -593,6 +637,14 @@ local function UpdateButton(b)
 	elseif b.spellID then
 		b.icon:SetTexture(SpellTexture(b.spellID))
 		b.count:SetText("")
+		-- the Soulstone "create" button is tinted
+		if b.soulstone then
+			b.icon:SetDesaturated(true)
+			b.icon:SetVertexColor(unpack(CREATE_TINT))
+			b.icon:SetAlpha(1)
+			UpdateCooldown(b)
+			return
+		end
 	else
 		b.icon:SetTexture(EMPTY_ICON)
 		b.icon:SetDesaturated(true)
@@ -613,7 +665,10 @@ ns.UpdateButton = UpdateButton
 local function SetClickAttributes(b)
 	for _, a in ipairs({ "type", "item", "macrotext", "type2", "macrotext2" }) do b:SetAttribute(a, nil) end
 	if b.itemID then
-		if b.key == "weaponBuff" then
+		if b.soulstone then
+			b:SetAttribute("type", "macro")
+			b:SetAttribute("macrotext", "/use [@target,help,nodead][@player] item:" .. b.itemID)
+		elseif b.key == "weaponBuff" then
 			b:SetAttribute("type", "macro")
 			b:SetAttribute("macrotext", "/use item:" .. b.itemID .. "\n/use 16")
 			b:SetAttribute("type2", "macro")
@@ -662,6 +717,9 @@ function Layout()
 		b.weaponImbue = s and s.weapon
 		b.exclusive = s and s.exclusive
 		b.ally = s and s.ally
+		b.soulstone = s and s.soulstone
+		-- a Soulstone in the bags is used; without one the button creates it
+		if b.soulstone and soulstoneItem then b.itemID = soulstoneItem; b.spellID = nil end
 		-- HIDE mode: a buff that is already on you leaves the bar until it fades
 		if s and hideActive then Evaluate(b) else b.active = false end
 		-- class slots only ever appear when you know the spell
@@ -723,6 +781,7 @@ local function Signature()
 	for i, slot in ipairs(SLOTS) do
 		local s = SlotData(slot)
 		t[i] = s and (s.itemID or s.spellID) or 0
+		if s and s.soulstone then t[i] = t[i] .. ":" .. (soulstoneItem or 0) end
 	end
 	return table.concat(t, ",")
 end
@@ -970,13 +1029,18 @@ events:SetScript("OnEvent", function(_, event, arg1)
 			"GET_ITEM_INFO_RECEIVED", "BAG_UPDATE_COOLDOWN", "SPELL_UPDATE_COOLDOWN", "SPELLS_CHANGED",
 			"BAG_UPDATE_DELAYED", -- fires once after any change to what is in the bags
 			"UNIT_INVENTORY_CHANGED", -- weapon enchants
-			"UNIT_AURA",
+			"UNIT_AURA", "GROUP_ROSTER_UPDATE",
 		}) do
 			pcall(events.RegisterEvent, events, e)
 		end
 		if ns.BuildOptions then ns.BuildOptions() end
 	elseif event == "UNIT_AURA" then
-		if arg1 == "player" or (arg1 == "target" and db.scanTarget) then ns.UpdateAllActive() end
+		if arg1 == "player" or (arg1 == "target" and db.scanTarget)
+			or (db.soulstoneParty and CLASS == "WARLOCK" and (arg1:find("^party%d") or arg1:find("^raid%d"))) then
+			ns.UpdateAllActive()
+		end
+	elseif event == "GROUP_ROSTER_UPDATE" then
+		if db.soulstoneParty and CLASS == "WARLOCK" then ns.UpdateAllActive() end
 	elseif event == "PLAYER_TARGET_CHANGED" then
 		if db.scanTarget then ns.UpdateAllActive() end
 	elseif event == "UNIT_INVENTORY_CHANGED" then

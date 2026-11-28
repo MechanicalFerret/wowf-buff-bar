@@ -316,6 +316,9 @@ function ns.BuildOptions()
 	check("Show item counts", function() return db.showCount end, function(v) db.showCount = v; ns.ApplySettings() end)
 	check("Show tooltips", function() return db.showTooltip end, function(v) db.showTooltip = v end)
 	check("Check friendly target", function() return db.scanTarget end, function(v) db.scanTarget = v; ns.ApplySettings() end)
+	if select(2, UnitClass("player")) == "WARLOCK" then
+		check("Soulstone: check party members", function() return db.soulstoneParty end, function(v) db.soulstoneParty = v; ns.ApplySettings() end)
+	end
 	Dropdown(panel, 16, y, "activeMode", ACTIVE_CHOICES, function(v) db.activeMode = v; ns.ApplySettings() end)
 	Dropdown(panel, 16, y - 32, "stackPref", STACK_CHOICES, function(v) db.stackPref = v; ns.Refresh(true, false) end)
 

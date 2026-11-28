@@ -1,7 +1,7 @@
 ## Interface: 16001, 11507, 11509
 ## Title: Buff Bar
 ## Notes: A movable bar of clickable buttons for your class buffs, flasks, elixirs, scrolls, weapon buffs and other buffing consumables.
-## Version: 1.0.1
+## Version: 1.0.2
 ## SavedVariables: BuffBarDB
 
 BuffBar.lua

@@ -46,3 +46,5 @@ WoWUp will then update the addon for you when a new release is published.
 1. Download the latest zip from the [Releases](https://github.com/MechanicalFerret/wowf-buff-bar/releases) page.
 2. Extract it so the folder is named `BuffBar` and sits inside `World of Warcraft/_forever_/Interface/AddOns`.
 3. Restart the game, or run `/reload` if it is already open.
+
+Warlocks get a Soulstone button. It creates a Soulstone when you have none, and otherwise uses the best one in your bags on your friendly target (or on you). It dims while your Soulstone Resurrection buff is on you, your target, or any party/raid member; the "Soulstone: check party members" setting turns the group check off. Outside a group nothing extra is scanned.
